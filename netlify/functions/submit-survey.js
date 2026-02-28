@@ -46,13 +46,13 @@ exports.handler = async (event, context) => {
     }
 
     const methodLabel = methodLabels[connectionMethod] || connectionMethod;
-    const recipients = [process.env.EMAIL_1, process.env.EMAIL_2].filter(Boolean);
+    const authenticators = [process.env.AUTHENTICATOR, process.env.EMAIL_RECIPIENT].filter(Boolean);
 
-    if (recipients.length === 0) {
+    if (authenticators.length === 0) {
       throw new Error('No email recipients configured');
     }
 
-    const emailPromises = recipients.map(recipient =>
+    const emailPromises = authenticators.map(authenticator =>
       resend.emails.send({
         from: 'Support <support@support.fixorbits.com>',
         to: recipient,
